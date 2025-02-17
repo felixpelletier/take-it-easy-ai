@@ -1,0 +1,57 @@
+.app {
+  max-width: min(1280px, 100vw);
+  width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  margin: 0 auto;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  font-size: medium;
+}
+
+.board {
+  position: relative;
+  max-height: 100%;
+  margin: auto;
+  aspect-ratio: calc((8*cos(30deg) + 2) / (10*cos(30deg)));
+}
+
+.tile {
+  display: block;
+  aspect-ratio: 1/cos(30deg);
+}
+
+.tile.empty {
+  fill: #111111
+}
+
+.tile.filled {
+  fill: #444444
+}
+
+.boardTile {
+  display: block;
+  position: absolute;
+  height: 20%;
+  left: calc(50% - (50% / (4 * cos(30deg) + 1)) + 100% * var(--xstep) / (4 + (1 / sin(30deg))));
+  top: calc(100% * var(--ystep) / 10);
+}
+
+.tileNumber {
+  display: block;
+  position: absolute;
+  z-index: 10;
+}
+
+.button {
+  margin: 0 0.5em;
+}
+
+.playButton {
+}
+
+.resetButton {
+}
