@@ -16,7 +16,10 @@ import gzip
 from dataclasses import dataclass
 import cProfile
 
+from checkpoint_helpers import get_latest_checkpoint_path
+
 IS_DEBUG = False
+OUT_DIR = "out"
 
 LEARNING_RATE = 1e-5
 LOW_LEARNING_RATE = 1e-6
@@ -39,7 +42,7 @@ ANNEALING_STEPS = 1000
 
 HIGH_SCORE_POWER = 1.0
 
-WIDTH = 1024
+WIDTH = 768
 GRADIENT_CLIPPING_NORM_THRESHOLD = 10
 GRADIENT_CLIPPING_VALUE_THRESHOLD = 100
 
@@ -170,7 +173,7 @@ def convert_board_to_tuple_of_tuples(board, tileset):
     return tuple(generator())
 
 
-def state_to_tensor(board, tileset, next_tile_index):
+def state_to_tensor(board: list[int], tileset: list[tuple[int]], next_tile_index: int):
     return torch.tensor(tuple(chain(*(convert_board_to_tuple_of_tuples(board, tileset) + (tileset[next_tile_index],)))), dtype=torch.float)
 
 
@@ -211,7 +214,6 @@ class NeuralNetwork(nn.Module):
         self.main_stack = nn.Sequential(
             nn.Linear((19 + 1) * 3, WIDTH),
 
-            ResidualBlock(WIDTH),
             ResidualBlock(WIDTH),
             ResidualBlock(WIDTH),
 
@@ -309,11 +311,7 @@ if __name__ == "__main__":
     starting_epoch = 0
     should_resume = 'Y' in input("Resume? (Y/N): ").strip().upper()
     if should_resume:
-        checkpoint_paths = glob.glob("out/takeiteasy*.pth.gz")
-        highest_timestamp = sorted([n.split("_")[1] for n in checkpoint_paths])[-1]
-        checkpoint_paths = [path for path in checkpoint_paths if highest_timestamp in path]
-
-        checkpoint_path = sorted(checkpoint_paths, key=lambda x: int(x.split("_")[2][:-len('.pth.gz')]))[-1]
+        checkpoint_path = get_latest_checkpoint_path(OUT_DIR)
         print(f"Resuming from '{checkpoint_path}'")
 
         with gzip.GzipFile(checkpoint_path, 'rb') as f:
@@ -421,9 +419,9 @@ if __name__ == "__main__":
             batch = random.sample(moves_memory, min(len(moves_memory), SAMPLE_SIZE))
 
         if epoch == 200:
+            print(time.time() - s_optimize)
             pr.disable()
             pr.dump_stats(f"profile_{time.time()}")
-
 
         model.train()
         for minibatch in batched(batch, MINIBATCH_SIZE):
@@ -506,7 +504,11 @@ if __name__ == "__main__":
         print(f"Optimize: {time.time() - s_optimize}s")
 
         if epoch % 5000 == 0 and epoch > 0 and epoch != starting_epoch:
-            with gzip.GzipFile(f"out/takeiteasy_{start_timestamp}_{epoch}.pth.gz", 'wb') as f:
+            prefix = f"takeiteasy_{start_timestamp}"
+            specific_outdir = os.path.join(OUT_DIR, prefix)
+            os.makedirs(specific_outdir, exist_ok=True)
+
+            with gzip.GzipFile(os.path.join(specific_outdir, f"{prefix}_{epoch}.pth.gz"), 'wb') as f:
                 torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),

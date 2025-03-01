@@ -1,4 +1,5 @@
 from main import NeuralNetwork, MemoryCell, Game, create_tileset
+from checkpoint_helpers import get_latest_checkpoint_path
 import glob
 import torch
 import math
@@ -15,12 +16,8 @@ if __name__ == "__main__":
         else "cpu"
     )
 
-    checkpoint_paths = glob.glob("out/takeiteasy*.pth.gz")
-    highest_timestamp = sorted([n.split("_")[1] for n in checkpoint_paths])[-1]
-    checkpoint_paths = [path for path in checkpoint_paths if highest_timestamp in path]
-
-    checkpoint_path = sorted(checkpoint_paths, key=lambda x: int(x.split("_")[2][:-len('.pth.gz')]))[-1]
-    print(f"Playing with '{checkpoint_path}'")
+    checkpoint_path = get_latest_checkpoint_path("out")
+    print(f"Exporting with '{checkpoint_path}'")
 
     model = NeuralNetwork().to(device)
 
@@ -35,8 +32,10 @@ if __name__ == "__main__":
     tileset = create_tileset()
     game = Game(tileset, device)
 
+    
     output_folder = "out/onnx"
-    output_name = f"{os.path.basename(checkpoint_path)[:-len('.pth.gz')]}.onnx"
+    base_name = os.path.basename(checkpoint_path)[:-len('.pth.gz')]
+    output_name = f"{base_name}.onnx"
     output_path = os.path.join(output_folder, output_name)
 
     torch.onnx.export(
@@ -47,3 +46,7 @@ if __name__ == "__main__":
         dynamo=True,             # True or False to select the exporter to use
         external_data=False  # File is less than 2GB. Export as one file.
     )
+
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+    quantized_model = quantize_dynamic(output_path, os.path.join(output_folder, f"{base_name}.q8.onnx"), weight_type=QuantType.QInt8)
+    quantized_model = quantize_dynamic(output_path, os.path.join(output_folder, f"{base_name}.q4.onnx"), weight_type=QuantType.QInt4)
