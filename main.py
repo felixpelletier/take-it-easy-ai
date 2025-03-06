@@ -21,9 +21,9 @@ from checkpoint_helpers import get_latest_checkpoint_path
 IS_DEBUG = False
 OUT_DIR = "out"
 
-LEARNING_RATE = 1e-5
-LOW_LEARNING_RATE = 1e-6
-RESTART_PERIOD = 10000
+LEARNING_RATE = 4e-6
+LOW_LEARNING_RATE = 1e-8
+RESTART_PERIOD = 100_000
 
 DISCOUNT_RATE = 0.98
 
@@ -319,6 +319,10 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        scheduler.base_lrs = [LEARNING_RATE for _ in scheduler.base_lrs]
+        scheduler.eta_min = LOW_LEARNING_RATE
+        scheduler.T_0 = RESTART_PERIOD
+        scheduler.T_i = RESTART_PERIOD
 
         starting_epoch = checkpoint['epoch'] + 1
         start_timestamp = checkpoint['start_timestamp']

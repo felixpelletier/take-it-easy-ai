@@ -23,7 +23,9 @@ function App() {
   useEffect(() => {
     (async () => {
       setSession(
-        await ort.InferenceSession.create("takeiteasy_1739493956_985000.onnx"),
+        await ort.InferenceSession.create(
+          "takeiteasy_1740792046_1500000.q8.onnx",
+        ),
       );
       setIsLoading(false);
       resetGame();
@@ -63,7 +65,7 @@ function App() {
 
       const results = await session.run({ input: tensor });
 
-      const resultsData = Array.from(results.linear_10.data as Float32Array);
+      const resultsData = Array.from(results.linear_7.data as Float32Array);
 
       console.log(board.current);
 
