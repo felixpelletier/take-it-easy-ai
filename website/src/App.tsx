@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LoadingOverlay, Box, Container } from "@mantine/core";
+import { LoadingOverlay, Box, Container, Modal, Grid } from "@mantine/core";
 import "./App.css";
 
 import * as ort from "onnxruntime-web";
@@ -17,8 +17,10 @@ function App() {
   );
   const [score, setScore] = useState(0);
 
-  const gameTilesRef = useRef([] as number[]);
+  const [nextTileIndex, setNextTileIndex] = useState<number | null>(null);
   const isAlreadyPlaying = useRef(false);
+
+  const [tileSelectorOpened, setTileSelectorOpened] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -32,30 +34,27 @@ function App() {
     })();
   }, []);
 
+  function randomInt(min: number, max: number) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
   function resetGame() {
     board.current.fill(null) as (number | null)[];
-    gameTilesRef.current = tileset
-      .map((_, i) => [i, Math.random()])
-      .sort((a, b) => a[1] - b[1])
-      .map((v) => v[0])
-      .slice(0, 19);
-
+    setNextTileIndex(randomInt(0, tileset.length - 1));
     refreshBoardView();
   }
 
   async function playOnce() {
     if (session == null) return;
-    if (gameTilesRef.current.length == 0) return;
+    if (nextTileIndex == null) return;
     if (isAlreadyPlaying.current) return;
     if (isLoading) return;
     isAlreadyPlaying.current = true;
 
-    console.log(gameTilesRef.current);
-
     try {
       const state = [
         ...board.current.flatMap((b) => (b ? tileset[b] : [0, 0, 0])),
-        ...tileset[gameTilesRef.current[0]],
+        ...tileset[nextTileIndex],
       ];
 
       const tensor = new ort.Tensor("float32", Float32Array.from(state), [
@@ -76,10 +75,19 @@ function App() {
         .filter((actionIndex) => board.current[actionIndex] == null)[0];
 
       console.log(actionIndex);
-      console.log(gameTilesRef.current[0]);
+      console.log(nextTileIndex);
 
-      board.current[actionIndex] = gameTilesRef.current[0];
-      gameTilesRef.current.shift();
+      board.current[actionIndex] = nextTileIndex;
+
+      if (board.current.includes(null)) {
+        const validTiles = [...Array(tileset.length).keys()].filter(
+          (tileIndex) => !board.current.includes(tileIndex),
+        );
+
+        setNextTileIndex(validTiles[randomInt(0, validTiles.length - 1)]);
+      } else {
+        setNextTileIndex(null);
+      }
       refreshBoardView();
     } finally {
       isAlreadyPlaying.current = false;
@@ -93,6 +101,32 @@ function App() {
 
   return (
     <>
+      <Modal
+        opened={tileSelectorOpened}
+        onClose={() => setTileSelectorOpened(false)}
+        title="Tile selector"
+        size={"xs"}
+      >
+        <Grid columns={3}>
+          {tileset.map((tile, tileIndex) => {
+            const isEnabled = !board.current.includes(tileIndex);
+            return (
+              <Grid.Col span={1}>
+                <Box
+                  onClick={() => {
+                    if (!isEnabled) return;
+                    setNextTileIndex(tileIndex);
+                    setTileSelectorOpened(false);
+                  }}
+                >
+                  <Tile tile={isEnabled ? tile : null} />
+                </Box>
+              </Grid.Col>
+            );
+          })}
+        </Grid>
+      </Modal>
+
       <Box pos="relative">
         <LoadingOverlay
           visible={isLoading}
@@ -165,13 +199,16 @@ function App() {
                   margin: "0 auto",
                 }}
               >
-                <Tile
-                  tile={
-                    gameTilesRef.current
-                      ? tileset[gameTilesRef.current[0]]
-                      : null
-                  }
-                />
+                <Box
+                  onClick={() => {
+                    if (nextTileIndex == null) return; // Means the game is over
+                    setTileSelectorOpened(true);
+                  }}
+                >
+                  <Tile
+                    tile={nextTileIndex != null ? tileset[nextTileIndex] : null}
+                  />
+                </Box>
               </div>
             </div>
             <button
@@ -202,7 +239,7 @@ function BoardTile(props: {
 }) {
   return (
     <>
-      <span
+      <Container
         className="boardTile"
         style={
           {
@@ -212,7 +249,7 @@ function BoardTile(props: {
         }
       >
         <Tile tile={props.tile} />
-      </span>
+      </Container>
     </>
   );
 }
@@ -270,19 +307,21 @@ function Tile(props: { tile: [number, number, number] | null }) {
 
   return (
     <>
-      <svg
-        width="100%"
-        height="100%"
-        viewBox={viewBox}
-        className={`tile ${props.tile ? "filled" : "empty"}`}
-        style={{
-          stroke: "red",
-          strokeWidth: "0.1rem",
-        }}
-      >
-        <polygon vectorEffect={"non-scaling-stroke"} points={pointsText} />
-      </svg>
-      <Values />
+      <Box component="span" pos={"relative"} ta={"left"} display={"block"}>
+        <svg
+          width="100%"
+          height="100%"
+          viewBox={viewBox}
+          className={`tile ${props.tile ? "filled" : "empty"}`}
+          style={{
+            stroke: "red",
+            strokeWidth: "0.1rem",
+          }}
+        >
+          <polygon vectorEffect={"non-scaling-stroke"} points={pointsText} />
+        </svg>
+        <Values />
+      </Box>
     </>
   );
 }

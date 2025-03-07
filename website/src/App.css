@@ -35,6 +35,8 @@
 .boardTile {
   display: block;
   position: absolute;
+  padding: 0;
+  aspect-ratio: 1/cos(30deg);
   height: 20%;
   left: calc(50% - (50% / (4 * cos(30deg) + 1)) + 100% * var(--xstep) / (4 + (1 / sin(30deg))));
   top: calc(100% * var(--ystep) / 10);
