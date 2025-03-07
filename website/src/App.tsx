@@ -18,7 +18,13 @@ function App() {
   const [score, setScore] = useState(0);
 
   const [nextTileIndex, setNextTileIndex] = useState<number | null>(null);
+  const placedPosisionsIndex = useRef<number[]>([]);
   const isAlreadyPlaying = useRef(false);
+
+  const [resetConfirmation, setResetConfirmation] = useState(false);
+  const resetConfirmationTimeout = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   const [tileSelectorOpened, setTileSelectorOpened] = useState(false);
 
@@ -40,8 +46,25 @@ function App() {
 
   function resetGame() {
     board.current.fill(null) as (number | null)[];
+    placedPosisionsIndex.current = [];
     setNextTileIndex(randomInt(0, tileset.length - 1));
     refreshBoardView();
+  }
+
+  function pressResetButton() {
+    if (resetConfirmation) {
+      resetGame();
+      setResetConfirmation(false);
+      if (resetConfirmationTimeout.current != null) {
+        clearTimeout(resetConfirmationTimeout.current);
+        resetConfirmationTimeout.current = null;
+      }
+    } else {
+      resetConfirmationTimeout.current = setTimeout(() => {
+        setResetConfirmation(false);
+      }, 2000);
+      setResetConfirmation(true);
+    }
   }
 
   async function playOnce() {
@@ -78,6 +101,7 @@ function App() {
       console.log(nextTileIndex);
 
       board.current[actionIndex] = nextTileIndex;
+      placedPosisionsIndex.current.push(actionIndex);
 
       if (board.current.includes(null)) {
         const validTiles = [...Array(tileset.length).keys()].filter(
@@ -97,6 +121,17 @@ function App() {
   function refreshBoardView() {
     setBoardView(board.current.map((b) => (b != null ? tileset[b] : null)));
     setScore(getBoardScore(board.current, tileset));
+  }
+
+  function undo() {
+    if (placedPosisionsIndex.current.length === 0) return;
+    const lastPlacedIndex =
+      placedPosisionsIndex.current[placedPosisionsIndex.current.length - 1];
+
+    placedPosisionsIndex.current.pop();
+    setNextTileIndex(board.current[lastPlacedIndex]);
+    board.current[lastPlacedIndex] = null;
+    refreshBoardView();
   }
 
   return (
@@ -219,11 +254,18 @@ function App() {
               Play
             </button>
             <button
+              className="button playButton"
+              style={{ flex: 1 }}
+              onClick={() => undo()}
+            >
+              Undo
+            </button>
+            <button
               className="button resetButton"
               style={{ flex: 1 }}
-              onClick={() => resetGame()}
+              onClick={() => pressResetButton()}
             >
-              Reset
+              {resetConfirmation ? "Sure?" : "Reset"}
             </button>
           </div>
         </Container>
