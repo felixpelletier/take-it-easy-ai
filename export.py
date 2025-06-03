@@ -1,10 +1,7 @@
-from main import NeuralNetwork, MemoryCell, Game, create_tileset
+from main import PolicyNeuralNetwork, Game, create_tileset
 from checkpoint_helpers import get_latest_checkpoint_path
-import glob
 import torch
-import math
 import gzip
-import sys
 import os
 
 if __name__ == "__main__":
@@ -16,22 +13,21 @@ if __name__ == "__main__":
         else "cpu"
     )
 
-    checkpoint_path = get_latest_checkpoint_path("out")
+    checkpoint_path = get_latest_checkpoint_path("takeiteasy", "out")
     print(f"Exporting with '{checkpoint_path}'")
 
-    model = NeuralNetwork().to(device)
+    model = PolicyNeuralNetwork().to(device)
 
     print("Loading...")
     with gzip.GzipFile(checkpoint_path, 'rb') as f:
         checkpoint = torch.load(f, weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['policy']['model_state_dict'])
     print("Done!")
 
     model.eval()
 
     tileset = create_tileset()
     game = Game(tileset, device)
-
     
     output_folder = "out/onnx"
     base_name = os.path.basename(checkpoint_path)[:-len('.pth.gz')]

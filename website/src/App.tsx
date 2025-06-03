@@ -32,7 +32,7 @@ function App() {
     (async () => {
       setSession(
         await ort.InferenceSession.create(
-          "takeiteasy_1740792046_1500000.q8.onnx",
+          "takeiteasy_1747787650_310000.q8.onnx",
         ),
       );
       setIsLoading(false);
@@ -87,7 +87,7 @@ function App() {
 
       const results = await session.run({ input: tensor });
 
-      const resultsData = Array.from(results.linear_7.data as Float32Array);
+      const resultsData = Array.from(results.linear_3.data as Float32Array);
 
       console.log(board.current);
 

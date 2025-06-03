@@ -12,16 +12,21 @@ from statistics import median
 import glob
 import datetime
 import os, sys
-import gc
+import sys
 import gzip
 from dataclasses import dataclass
+from typing import Optional
 import cProfile
 
 from checkpoint_helpers import get_latest_checkpoint_path
 
-DEBUG = False
-DEBUG_RESUME = False
+DEBUG = bool(os.environ.get('RL_PYTHON_DEBUG', ""))
+DEBUG_RESUME = True
 
+RISKY_MODE = sys.argv[1].lower().strip() == "risky" if len(sys.argv) > 1 else False
+
+MODEL_NAME = "takeiteasy" if not RISKY_MODE else "takeiteasy_risky"
+RISK_TAKING_POWER = 1.0 if not RISKY_MODE else 2.0
 OUT_DIR = "out"
 
 NUMBER_OF_TILES_IN_BOARD = 19
@@ -29,25 +34,27 @@ STATE_SIZE = (NUMBER_OF_TILES_IN_BOARD + 1) * 3
 
 SEED = 42
 
-LEARNING_RATE = 1e-5
-LOW_LEARNING_RATE = 1e-6
-RESTART_PERIOD = 1000
+ITERATIONS = 10_000_000
 
-DISCOUNT_RATE = 0.98
+LEARNING_RATE = 2.5e-4
+LOW_LEARNING_RATE = 5e-6
+# LOW_LEARNING_RATE = 1e-9
+RESTART_PERIOD = 200_000
 
-EPOCHS = 1
-PARALLEL_GAMES_COUNT = 32
+DISCOUNT_RATE = 0.999
+
+EPOCHS = 4
+PARALLEL_GAMES_COUNT = 512
 MAX_STEPS_PER_GAME = NUMBER_OF_TILES_IN_BOARD
 BATCH_SIZE = MAX_STEPS_PER_GAME * PARALLEL_GAMES_COUNT
-MINIBATCH_SIZE = 32
+MINIBATCH_SIZE = 512
 
-ITERATIONS = 5_000_000
 
-ACTOR_NETWORK_WIDTH = 1024
-CRITIC_NETWORK_WIDTH = 1024
+ACTOR_NETWORK_WIDTH = 128
+CRITIC_NETWORK_WIDTH = 128
 
 CLIP_COEF = 0.2
-ENTROPY_COEF = 0.01
+ENTROPY_COEF = 0.0001
 
 VALUE_GRADIENT_CLIPPING_VALUE_THRESHOLD = 100
 
@@ -126,12 +133,38 @@ def convert_board_to_tuple_of_tuples(board, tileset):
 def state_to_tensor(board: list[int], tileset: list[tuple[int]], next_tile_index: int):
     return torch.tensor(tuple(chain(*(convert_board_to_tuple_of_tuples(board, tileset) + (tileset[next_tile_index],)))), dtype=torch.float)
 
+class CategoricalMasked(torch.distributions.Categorical):
+    def __init__(self, logits: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        self.mask = mask
+        self.batch, self.nb_action = logits.size()
+        if mask is None:
+            super(CategoricalMasked, self).__init__(logits=logits)
+        else:
+            self.mask_value = torch.tensor(
+                torch.finfo(logits.dtype).min, dtype=logits.dtype
+            )
+            logits = torch.where(self.mask, logits, self.mask_value)
+            super(CategoricalMasked, self).__init__(logits=logits)
+
+    def entropy(self):
+        if self.mask is None:
+            return super().entropy()
+        # Elementwise multiplication
+        p_log_p = torch.multiply(self.logits, self.probs)
+        # Compute the entropy with possible action only
+        p_log_p = torch.where(
+            self.mask,
+            p_log_p,
+            torch.tensor(0, dtype=p_log_p.dtype, device=p_log_p.device),
+        )
+        return -p_log_p.sum(-1)
+
 
 class BasicBlock(nn.Module):
     def __init__(self, in_width, out_width):
         super().__init__()
         self.stack = nn.Sequential(
-            nn.BatchNorm1d(in_width),
+            # nn.BatchNorm1d(in_width),
             # nn.Tanh(),
             nn.GELU(),
             nn.Linear(in_width, out_width),
@@ -145,11 +178,9 @@ class ResidualBlock(nn.Module):
         super().__init__()
         self.stack = nn.Sequential(
             BasicBlock(width, width),
-            BasicBlock(width, width),
+            # BasicBlock(width, width),
             BasicBlock(width, width),
         )
-
-        self.stack.apply(init_weights) # Not sure it's necessary since the one in the parent might do the job. Better safe than sorry.
 
     def forward(self, x):
         residual = x
@@ -165,23 +196,17 @@ class PolicyNeuralNetwork(nn.Module):
         self.main_stack = nn.Sequential(
             nn.Linear(STATE_SIZE, ACTOR_NETWORK_WIDTH),
 
-            ResidualBlock(ACTOR_NETWORK_WIDTH),
-            ResidualBlock(ACTOR_NETWORK_WIDTH),
+            BasicBlock(ACTOR_NETWORK_WIDTH, ACTOR_NETWORK_WIDTH),
+            BasicBlock(ACTOR_NETWORK_WIDTH, ACTOR_NETWORK_WIDTH),
 
-            BasicBlock(ACTOR_NETWORK_WIDTH, 19),
+            BasicBlock(ACTOR_NETWORK_WIDTH, NUMBER_OF_TILES_IN_BOARD),
         )
 
         self.main_stack.apply(init_weights(0.01))
 
     def forward(self, x):
-        out = self.main_stack(x)
-        out1 = nn.functional.softmax(out, dim=-1)
+        return self.main_stack(x)
 
-        mask = x[:, 0:NUMBER_OF_TILES_IN_BOARD*3:3] == 0
-
-        out2 = out1 * mask
-        out3 = nn.functional.normalize(out2, p=1, dim=-1)
-        return out3
 
 class ValueNeuralNetwork(nn.Module):
     def __init__(self):
@@ -190,8 +215,8 @@ class ValueNeuralNetwork(nn.Module):
         self.main_stack = nn.Sequential(
             nn.Linear(STATE_SIZE, CRITIC_NETWORK_WIDTH),
 
-            ResidualBlock(CRITIC_NETWORK_WIDTH),
-            ResidualBlock(CRITIC_NETWORK_WIDTH),
+            BasicBlock(CRITIC_NETWORK_WIDTH, CRITIC_NETWORK_WIDTH),
+            BasicBlock(CRITIC_NETWORK_WIDTH, CRITIC_NETWORK_WIDTH),
 
             BasicBlock(CRITIC_NETWORK_WIDTH, 1),
         )
@@ -289,52 +314,67 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True
 
     start_timestamp = str(int(time.time()))
+    current_time = datetime.datetime.now().strftime("%b%d_%H-%M-%S")
 
     policy_model = PolicyNeuralNetwork().to(device)
     policy_optimizer = torch.optim.AdamW(
         policy_model.parameters(), 
         lr=LEARNING_RATE, 
         amsgrad=True, 
-        weight_decay=1e-1
+        # weight_decay=1e-1
+        eps=1e-5 # Apparently that's better.
     )
-    policy_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(policy_optimizer, T_0=RESTART_PERIOD, T_mult=1, eta_min=LOW_LEARNING_RATE)
+    # policy_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(policy_optimizer, T_0=RESTART_PERIOD, T_mult=1, eta_min=LOW_LEARNING_RATE)
+    policy_scheduler = torch.optim.lr_scheduler.LinearLR(policy_optimizer, start_factor=1, end_factor=(LOW_LEARNING_RATE / LEARNING_RATE), total_iters=RESTART_PERIOD)
 
     value_model = ValueNeuralNetwork().to(device)
-    value_optimizer = torch.optim.AdamW(value_model.parameters(), lr=LEARNING_RATE, amsgrad=True, weight_decay=1e-1)
-    value_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(value_optimizer, T_0=RESTART_PERIOD, T_mult=1, eta_min=LOW_LEARNING_RATE)
+    value_optimizer = torch.optim.AdamW(
+        value_model.parameters(), 
+        lr=LEARNING_RATE, 
+        amsgrad=True, 
+        # weight_decay=1e-1, 
+        eps=1e-5 # Apparently that's better.
+    )
+    # value_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(value_optimizer, T_0=RESTART_PERIOD, T_mult=1, eta_min=LOW_LEARNING_RATE)
+    value_scheduler = torch.optim.lr_scheduler.LinearLR(value_optimizer, start_factor=1, end_factor=(LOW_LEARNING_RATE / LEARNING_RATE), total_iters=RESTART_PERIOD)
     value_loss_fn = nn.MSELoss()
 
     starting_iteration = 0
     should_resume = not (DEBUG and not DEBUG_RESUME) and 'Y' in input("Resume? (Y/N): ").strip().upper()
     if should_resume:
-        checkpoint_path = get_latest_checkpoint_path(OUT_DIR)
+        checkpoint_path = get_latest_checkpoint_path(MODEL_NAME, OUT_DIR)
         print(f"Resuming from '{checkpoint_path}'")
 
         with gzip.GzipFile(checkpoint_path, 'rb') as f:
             checkpoint = torch.load(f, weights_only=True)
 
+        starting_iteration = checkpoint['iteration'] + 1
+        start_timestamp = checkpoint['start_timestamp']
+        current_time = checkpoint['current_time']
+
         policy_model.load_state_dict(checkpoint['policy']['model_state_dict'])
         policy_optimizer.load_state_dict(checkpoint['policy']['optimizer_state_dict'])
         policy_scheduler.load_state_dict(checkpoint['policy']['scheduler_state_dict'])
         policy_scheduler.base_lrs = [LEARNING_RATE for _ in policy_scheduler.base_lrs]
-        policy_scheduler.eta_min = LOW_LEARNING_RATE
-        policy_scheduler.T_0 = RESTART_PERIOD
-        policy_scheduler.T_i = RESTART_PERIOD
+        policy_scheduler.end_factor = LOW_LEARNING_RATE / LEARNING_RATE
+        policy_scheduler.total_iters = RESTART_PERIOD
+        if starting_iteration > RESTART_PERIOD:
+            for param_group in policy_optimizer.param_groups:
+                param_group['lr'] = LOW_LEARNING_RATE
 
         value_model.load_state_dict(checkpoint['value']['model_state_dict'])
         value_optimizer.load_state_dict(checkpoint['value']['optimizer_state_dict'])
         value_scheduler.load_state_dict(checkpoint['value']['scheduler_state_dict'])
         value_scheduler.base_lrs = [LEARNING_RATE for _ in value_scheduler.base_lrs]
-        value_scheduler.eta_min = LOW_LEARNING_RATE
-        value_scheduler.T_0 = RESTART_PERIOD
-        value_scheduler.T_i = RESTART_PERIOD
+        value_scheduler.end_factor = LOW_LEARNING_RATE / LEARNING_RATE
+        value_scheduler.total_iters = RESTART_PERIOD
+        if starting_iteration > RESTART_PERIOD:
+            for param_group in value_optimizer.param_groups:
+                param_group['lr'] = LOW_LEARNING_RATE
 
-        starting_iteration = checkpoint['iteration'] + 1
-        start_timestamp = checkpoint['start_timestamp']
 
-    current_time = datetime.datetime.now().strftime("%b%d_%H-%M-%S")
     log_dir = os.path.join(
-        "runs", f"{start_timestamp}_{current_time}_{starting_iteration}"
+        "runs", f"{MODEL_NAME}_{start_timestamp}_{current_time}"
     )
 
     if DEBUG:
@@ -356,6 +396,7 @@ if __name__ == "__main__":
 
         states = torch.zeros((MAX_STEPS_PER_GAME, PARALLEL_GAMES_COUNT, STATE_SIZE)).to(device)
         actions = torch.zeros((MAX_STEPS_PER_GAME, PARALLEL_GAMES_COUNT)).to(device)
+        masks = torch.zeros((MAX_STEPS_PER_GAME, PARALLEL_GAMES_COUNT, NUMBER_OF_TILES_IN_BOARD), dtype=torch.bool).to(device)
         logprobs = torch.zeros((MAX_STEPS_PER_GAME, PARALLEL_GAMES_COUNT)).to(device)
         rewards = torch.zeros((MAX_STEPS_PER_GAME, PARALLEL_GAMES_COUNT)).to(device)
         estimated_values = torch.zeros((MAX_STEPS_PER_GAME, PARALLEL_GAMES_COUNT)).to(device)
@@ -366,6 +407,7 @@ if __name__ == "__main__":
             games = [Game(tileset, device) for i in range(PARALLEL_GAMES_COUNT)]
             for step_number in range(MAX_STEPS_PER_GAME):
                 step_states = torch.stack([game.get_state() for game in games]).to(device)
+                # step_states = step_states / 9
                 states[step_number] = step_states
 
                 step_logits = policy_model(step_states)
@@ -376,11 +418,13 @@ if __name__ == "__main__":
                 # step_actions = valid_probs.sample()
                 # logprobs[step_number] = valid_probs.log_prob(step_actions)
 
-                probs = torch.distributions.categorical.Categorical(probs=step_logits)
-                step_actions = probs.sample()
+                mask = (step_states[:, 0:NUMBER_OF_TILES_IN_BOARD*3:3] == 0).type(torch.bool)
+                distribution = CategoricalMasked(logits=step_logits, mask=mask)
+                step_actions = distribution.sample()
+
                 actions[step_number] = step_actions
-                logprobs[step_number] = probs.log_prob(step_actions)
-                step_probs = probs
+                logprobs[step_number] = distribution.log_prob(step_actions)
+                masks[step_number] = mask
 
                 for game_number, game in enumerate(games):
                     initial_score = game.get_score()
@@ -390,7 +434,7 @@ if __name__ == "__main__":
 
                     new_score = game.get_score()
                     if is_legal:
-                        rewards[step_number, game_number] = new_score - initial_score
+                        rewards[step_number, game_number] = 10 * (((new_score - initial_score) / 307) ** RISK_TAKING_POWER)
                     else: 
                         rewards[step_number, game_number] = 0
                     
@@ -433,6 +477,7 @@ if __name__ == "__main__":
         b_states = states.reshape((-1,STATE_SIZE))
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape(-1)
+        b_masks = masks.reshape(-1, NUMBER_OF_TILES_IN_BOARD)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = estimated_values.reshape(-1)
@@ -448,23 +493,18 @@ if __name__ == "__main__":
 
                 mb_states = b_states[mb_inds]
                 mb_actions = b_actions[mb_inds]
-
-                # logits = policy_model(mb_states)
-                # probs = torch.distributions.categorical.Categorical(logits=logits)
-                # valid_probs = torch.distributions.categorical.Categorical(probs=probs.probs * mb_action_masks)
-                # newlogprobs = valid_probs.log_prob(mb_actions)
-                # entropy = valid_probs.entropy()
+                mb_masks = b_masks[mb_inds]
 
                 logits = policy_model(mb_states)
-                # probs = torch.distributions.categorical.Categorical(probs=logits * mb_action_masks)
-                probs = torch.distributions.categorical.Categorical(probs=logits)
-                newlogprobs = probs.log_prob(mb_actions)
-                entropy = probs.entropy()
+                distribution = CategoricalMasked(logits=logits, mask=mb_masks)
+                newlogprobs = distribution.log_prob(mb_actions)
+                entropy = distribution.entropy()
 
                 logratio = newlogprobs - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
                 mb_advantages = b_advantages[mb_inds]
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8) # Advantages normalization
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
@@ -482,7 +522,17 @@ if __name__ == "__main__":
                 # Value loss
                 newvalue = value_model(mb_states)
                 newvalue = newvalue.view(-1)
-                value_loss = value_loss_fn(newvalue, b_returns[mb_inds])
+
+                # value_loss = value_loss_fn(newvalue, b_returns[mb_inds])
+                value_loss_unclipped = (newvalue - b_returns[mb_inds]).pow(2)
+                values_clipped = b_values[mb_inds] + torch.clamp(
+                    newvalue - b_values[mb_inds],
+                    -CLIP_COEF,
+                    CLIP_COEF,
+                )
+                value_loss_clipped = (values_clipped - b_returns[mb_inds]) ** 2
+                value_loss_max = torch.max(value_loss_unclipped, value_loss_clipped)
+                value_loss = 0.5 * value_loss_max.mean()
 
                 value_optimizer.zero_grad()
                 value_loss.backward()
@@ -502,6 +552,10 @@ if __name__ == "__main__":
         writer.add_scalar("Min score", min(epoch_scores), iteration)
         print(f"Max score: {max(epoch_scores)}")
         writer.add_scalar("Max score", max(epoch_scores), iteration)
+        print(f"Policy loss: {pg_loss.item()}")
+        writer.add_scalar("Policy loss", pg_loss.item(), iteration)
+        print(f"Value loss: {value_loss.item()}")
+        writer.add_scalar("Value loss", value_loss.item(), iteration)
         print()
         print(f"Learning rate: {policy_scheduler.get_last_lr()[0]}")
         writer.add_scalar("Learning rate", policy_scheduler.get_last_lr()[0], iteration)
@@ -511,8 +565,8 @@ if __name__ == "__main__":
         #writer.add_scalar("Median loss", median(epoch_loss), epoch)
         print(f"Optimize: {time.time() - s_optimize}s")
 
-        if iteration % 5000 == 0 and iteration > 0 and iteration != starting_iteration:
-            prefix = f"takeiteasy_{start_timestamp}"
+        if iteration % 1000 == 0 and (iteration != starting_iteration or iteration == 0) and not DEBUG:
+            prefix = f"{MODEL_NAME}_{start_timestamp}"
             specific_outdir = os.path.join(OUT_DIR, prefix)
             os.makedirs(specific_outdir, exist_ok=True)
 
@@ -525,11 +579,12 @@ if __name__ == "__main__":
                     'scheduler_state_dict': policy_scheduler.state_dict(),
                 },
                 'value': {
-                    'model_state_dict': policy_model.state_dict(),
-                    'optimizer_state_dict': policy_optimizer.state_dict(),
-                    'scheduler_state_dict': policy_scheduler.state_dict(),
+                    'model_state_dict': value_model.state_dict(),
+                    'optimizer_state_dict': value_optimizer.state_dict(),
+                    'scheduler_state_dict': value_scheduler.state_dict(),
                 },
                 'start_timestamp': start_timestamp,
+                'current_time': current_time,
                 }, f)
 
     writer.close()
